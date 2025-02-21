@@ -26,7 +26,17 @@ class Coinbase
                 'type' => 'input',
             ],
             'coinbase_webhook_key' => [
-                'label' => 'WEBHOOK KEY',
+                'label' => 'WEBHOOK SECRET',
+                'description' => '',
+                'type' => 'input',
+            ],
+            'coinbase_product_name' => [
+                'label' => '自定义产品名称',
+                'description' => '',
+                'type' => 'input',
+            ],
+            'coinbase_currency' => [
+                'label' => '币种',
                 'description' => '',
                 'type' => 'input',
             ],
@@ -37,12 +47,12 @@ class Coinbase
     {
 
         $params = [
-            'name' => '订阅套餐',
-            'description' => '订单号 ' . $order['trade_no'],
+            'name' => $this->config['coinbase_product_name'],
+            'description' => 'Order ' . $order['trade_no'],
             'pricing_type' => 'fixed_price',
             'local_price' => [
                 'amount' => sprintf('%.2f', $order['total_amount'] / 100),
-                'currency' => 'CNY'
+                'currency' => $this->config['coinbase_currency']
             ],
             'metadata' => [
                 "outTradeNo" => $order['trade_no'],
@@ -64,28 +74,57 @@ class Coinbase
         ];
     }
 
+
     public function notify($params)
     {
+        try {
+            $payload = get_request_content();
+            $payload_old = $payload
+            // 反转义斜杠
+            $payload = str_replace('\\/', '/', $payload);
 
-        $payload = trim(get_request_content());
-        $json_param = json_decode($payload, true);
+            $json_param = json_decode($payload, true);
 
+            $headerName = 'X-Cc-Webhook-Signature';
+            $headers = getallheaders();
+            $signatureHeader = $headers[$headerName] ?? '';
+            
+            // 计算 HMAC 并进行 Base64 编码
+            $computedSignature = hash_hmac('sha256', $payload, $this->config['coinbase_webhook_key'], false);
+            
+            // 记录Debug Log
+            // $logData = [
+            //     'timestamp' => date('Y-m-d H:i:s'),
+            //     'received_signature' => $signatureHeader,
+            //     'computed_signature' => $computedSignature,
+            //     'raw_payload_old' => $payload_old,
+            //     'raw_payload' => $payload,
+            //     'decoded_payload' => $json_param,
+            //     'headers' => $headers
+            // ];
+            // $logMessage = "=== Coinbase Webhook Debug ===\n" . print_r($logData, true);
+            // file_put_contents('/tmp/coinbase_webhook.log', $logMessage . "\n", FILE_APPEND);
+            // error_log($logMessage);
 
-        $headerName = 'X-Cc-Webhook-Signature';
-        $headers = getallheaders();
-        $signatureHeader = isset($headers[$headerName]) ? $headers[$headerName] : '';
-        $computedSignature = \hash_hmac('sha256', $payload, $this->config['coinbase_webhook_key']);
-
-        if (!self::hashEqual($signatureHeader, $computedSignature)) {
-            throw new ApiException('HMAC signature does not match', 400);
+            // 验证签名
+            if (!$this->hashEqual($signatureHeader, $computedSignature)) {
+                throw new ApiException("HMAC signature does not match. \nExpected: {$computedSignature}, \nActual: {$signatureHeader}", 400);
+            }
+            
+            // 提取业务数据
+            $out_trade_no = $json_param['event']['data']['metadata']['outTradeNo'] ?? 'N/A';
+            $pay_trade_no = $json_param['event']['id'] ?? 'N/A';
+            
+            return [
+                'trade_no' => $out_trade_no,
+                'callback_no' => $pay_trade_no
+            ];
+        } catch (ApiException $e) {
+            $errorMessage = "API ERROR: " . $e->getMessage();
+            error_log($errorMessage);
+            file_put_contents('/tmp/coinbase_webhook_error.log', $errorMessage . "\n", FILE_APPEND);
+            throw $e; 
         }
-
-        $out_trade_no = $json_param['event']['data']['metadata']['outTradeNo'];
-        $pay_trade_no = $json_param['event']['id'];
-        return [
-            'trade_no' => $out_trade_no,
-            'callback_no' => $pay_trade_no
-        ];
     }
 
 
@@ -110,26 +149,28 @@ class Coinbase
 
 
     /**
-     * @param string $str1
-     * @param string $str2
-     * @return bool
-     */
-    public function hashEqual($str1, $str2)
+    * @param string $computedSignature
+    * @param string $receivedSignature
+    * @return bool
+    */
+    public function hashEqual($computedSignature, $receivedSignature)
     {
         if (function_exists('hash_equals')) {
-            return \hash_equals($str1, $str2);
+            return hash_equals($computedSignature, $receivedSignature);
         }
 
-        if (strlen($str1) != strlen($str2)) {
+        if (strlen($computedSignature) !== strlen($receivedSignature)) {
             return false;
-        } else {
-            $res = $str1 ^ $str2;
-            $ret = 0;
-
-            for ($i = strlen($res) - 1; $i >= 0; $i--) {
-                $ret |= ord($res[$i]);
-            }
-            return !$ret;
         }
+
+        $res = $computedSignature ^ $receivedSignature;
+        $ret = 0;
+
+        for ($i = strlen($res) - 1; $i >= 0; $i--) {
+            $ret |= ord($res[$i]);
+        }
+
+        return !$ret;
     }
+
 }
